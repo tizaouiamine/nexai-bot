@@ -1,0 +1,27 @@
+# ── Sensitive files ──────────────────────────────────────
+.env
+.env.*
+*.key
+secrets.*
+
+# ── Generated outputs (reports, drafts) ──────────────────
+# Reports are gitignored — folder itself is tracked via .gitkeep
+Outputs/*
+!Outputs/.gitkeep
+
+# ── OS & editor clutter ──────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.vscode/settings.json
+
+# ── Node (future-proof if you add a backend) ─────────────
+node_modules/
+npm-debug.log*
+dist/
+build/
+
+# ── Claude Code internal ─────────────────────────────────
+.claude/
