@@ -107,6 +107,111 @@ Use these books as the intellectual foundation for all strategy decisions, signa
 - **Before adding a new filter**: ask if Taleb's fat-tail risk framework would block it
 - **When reviewing backtest results**: apply Douglas's probability thinking — a 60% win rate over 50+ trades is meaningful; 3 trades is noise
 
+# AI Agent Engineering Framework
+
+Source: [Top Books to Help You Build AI Agents Like Claude Code in 2026](https://medium.com/@victor.dibia/top-books-to-help-you-build-ai-agents-like-claude-code-in-2026-074ab71ac0c1) — Victor Dibia, 2026
+
+**Mandate:** When engineering any part of the NEXAI AI engine, orchestration, tool use, or agent loop — apply the frameworks from the books below. These define HOW the AI components are architected, not just what they trade. Think of NEXAI as a multi-agent system where each module (strategy.js, engine.js, training.js, chat.js) is an agent with a role, tools, and memory.
+
+---
+
+## Core Books — Apply Now
+
+### 1. Designing Multi-Agent Systems — Victor Dibia (2025)
+**The primary architecture reference for NEXAI's AI engine.**
+
+Key concepts to apply directly:
+- **Agents, Tools, Memory** — `engine.js` is the orchestrator agent; `strategy.js`, `binance.js`, `training.js` are its tools
+- **Six orchestration strategies** — NEXAI uses a *sequential pipeline*: candle → detect → evaluate → applyWeights → tryEnter. Consider upgrading to *parallel multi-agent* (scan multiple TFs simultaneously)
+- **Deterministic workflows** — the `onCandle` event loop is a deterministic workflow; each step has a defined input/output contract
+- **Trajectory-based testing** — test the bot's decision path end-to-end, not just individual functions
+- **Autonomous orchestration** — `app.js` is the master orchestrator; `engine.js` is a sub-agent that returns structured `EnrichedSignal`
+- **MCP/A2A protocols** — future: expose NEXAI tools (get_signal, place_order, get_portfolio) as MCP tools so Claude can call them directly
+
+**Apply when:** designing new modules, adding a new AI capability, or refactoring the engine loop.
+
+---
+
+### 2. Generative AI Design Patterns — Lakshmanan & Hapke (2025)
+**Pattern library for every AI feature in NEXAI.**
+
+32 patterns — the ones directly applicable:
+
+| Pattern | Where used in NEXAI | How to apply |
+|---------|-------------------|-------------|
+| **Tool calling** | `chat.js` system prompt gives Claude market data as context | Add real tool calls: `get_signal(pair)`, `get_portfolio()` |
+| **Chain-of-Thought** | `engine.js` `filters[]` array is CoT reasoning — each step logged | Expand: make the engine explain each filter decision |
+| **Tree-of-Thought** | Not yet implemented | Use for multi-hypothesis: "Is this a LONG or SHORT setup and why?" |
+| **RAG (Retrieval-Augmented Generation)** | Not yet implemented | Retrieve relevant historical trades before Claude responds |
+| **Reliability + guardrails** | `safePrice()`, vol spike gate, regime filter | Every AI output must be validated before acting on it |
+| **Multi-agent collaboration** | `engine.js` + `training.js` + `chat.js` run independently | Wire them: training informs engine; engine informs chat context |
+
+**Apply when:** adding any new AI feature — first identify which pattern it maps to.
+
+---
+
+### 3. Build a Large Language Model (From Scratch) — Sebastian Raschka (2024)
+**Foundation for understanding why Claude behaves the way it does in chat.js.**
+
+Key concepts to apply:
+- **Context window & token limits** — the `buildSystemPrompt()` in `chat.js` injects live prices and signals; keep it under ~800 tokens to leave room for reasoning
+- **Attention mechanisms** — Claude attends to the most recent tokens most strongly; put the most critical market data *last* in the system prompt
+- **Finetuning / LoRA** — future: fine-tune a small model on NEXAI's trade history to replace or assist the rule-based strategy
+- **Instruction following** — if Claude ignores part of the prompt, the token position matters — reorder, not rewrite
+
+**Apply when:** writing or debugging `chat.js` system prompts, or planning a fine-tuned signal model.
+
+---
+
+### 4. Building Applications with AI Agents — Michael Albada (2025)
+**Framework trade-off analysis and human-agent collaboration patterns.**
+
+Key concepts to apply:
+- **Framework comparison** (LangGraph / AutoGen style) — NEXAI's `app.js` is a hand-rolled agent orchestrator. It is the right choice for a static JS app. If a Python backend is added later, use LangGraph for the agent loop.
+- **Human-agent collaboration** — the "Bot: ON/OFF" toggle and config panel are the human-in-the-loop interface. The bot proposes, the human approves via config (min confidence, SL, TP).
+- **Interface design** — the training tab, simulation tab, and chat are three different collaboration surfaces. Each must give the user enough transparency to trust the agent.
+- **SFT / DPO / RL** — when trade history is large enough (200+ trades), use outcome data to fine-tune signal confidence weights via RL (reward = profitable close, penalty = SL hit)
+
+**Apply when:** designing the UX for any new bot capability, or planning the Python backend agent.
+
+---
+
+## Upcoming — Monitor for Future Features
+
+### 5. AI Agents with MCP — Kyle Stratis (O'Reilly, late 2026)
+- **Apply to:** Building NEXAI as an MCP server so Claude Code / Cursor / Claude Desktop can call `nexai_get_signal`, `nexai_place_order`, `nexai_backtest` as tools
+- **Action:** When this ships, expose `js/engine.js` outputs as MCP tool responses
+
+### 6. An Illustrated Guide to AI Agents — Grootendorst & Alammar (O'Reilly, Dec 2026)
+- **Apply to:** Visual reasoning about NEXAI's agent memory (candles, weights, paper portfolio) and planning (orchestration of multi-pair, multi-TF scanning)
+
+---
+
+## NEXAI Agent Architecture (derived from above frameworks)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    NEXAI Orchestrator (app.js)           │
+│                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │
+│  │Perception│  │ Reasoning │  │  Action  │  │Memory  │  │
+│  │binance.js│→ │engine.js  │→ │paper.js  │  │state.js│  │
+│  │mexc.js   │  │strategy.js│  │backtest  │  │weights │  │
+│  │(Tools)   │  │training.js│  │chat.js   │  │candles │  │
+│  └──────────┘  └──────────┘  └──────────┘  └────────┘  │
+│                                                          │
+│  Event bus: CustomEvent('nexai:candle') — decoupled     │
+└─────────────────────────────────────────────────────────┘
+```
+
+**When adding any new AI feature, place it in the correct layer:**
+- **Perception** (new data source) → create a new adapter like `binance.js`
+- **Reasoning** (new signal logic) → extend `engine.js` with a new filter
+- **Action** (new trade type) → extend `paper.js` or add `orders.js` for real trades
+- **Memory** (new persistent state) → add to `state.js` with a localStorage-backed setter
+
+---
+
 # GitHub Repository & Libraries
 
 ## Project Repo
