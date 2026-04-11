@@ -11,11 +11,12 @@
  *   - Engine integration: evaluate() wraps detect() with AI filters
  */
 
-import { PAIRS, STORAGE_KEYS }                        from './config.js';
+import { SEED_PAIRS, STORAGE_KEYS, fetchAllPairs, fetchMEXCPairs } from './config.js';
 import * as S from './state.js';
 import { detect }                                      from './strategy.js';
 import { evaluate, isTradeable }                       from './engine.js';
 import { fetchKlines, startWS }                        from './binance.js';
+import { fetchKlinesMEXC, startWSMEXC }                from './mexc.js';
 import { tryEnter, monitorTrades, closeAllTrades, paperStats } from './paper.js';
 import { runBacktest }                                 from './backtest.js';
 import {
@@ -33,6 +34,20 @@ let priceChart = null;
 // ── Per-pair HTF candle cache (for MTF engine) ────────────
 const htfCandles = {};  // 'BTCUSDT' → candle[] on '1d'
 const HTF        = '1d';
+
+// ── Active exchange ───────────────────────────────────────
+// 'binance' | 'mexc'
+let activeExchange = localStorage.getItem(STORAGE_KEYS.exchange) || 'binance';
+
+function fetchKlinesEx(symbol, interval, limit) {
+  return activeExchange === 'mexc'
+    ? fetchKlinesMEXC(symbol, interval, limit)
+    : fetchKlines(symbol, interval, limit);
+}
+function startWSEx(symbol, interval) {
+  if (activeExchange === 'mexc') startWSMEXC(symbol, interval);
+  else startWS(symbol, interval);
+}
 
 // ── Init ─────────────────────────────────────────────────
 
@@ -80,10 +95,28 @@ async function init() {
     renderSimUI();
   });
 
-  // Bootstrap pairs in PARALLEL (fixes slow sequential load)
-  await Promise.all(
-    PAIRS.map(sym => bootstrapPair(sym, S.cfg.tf))
-  );
+  // Wire exchange toggle
+  bindExchangeToggle();
+
+  // Fetch full pair list (all active USDT pairs from exchange info)
+  const allPairs = activeExchange === 'mexc'
+    ? await fetchMEXCPairs(200)
+    : await fetchAllPairs(300);
+
+  // Bootstrap seed pairs immediately (parallel), then add more in batches
+  const seedSet = new Set(SEED_PAIRS);
+  const seedPairs = allPairs.filter(s => seedSet.has(s));
+  const restPairs = allPairs.filter(s => !seedSet.has(s));
+
+  // Show total pair count
+  const pairCountEl = $('pair-count');
+  if (pairCountEl) pairCountEl.textContent = `${allPairs.length} pairs`;
+
+  // Seed pairs: fully parallel
+  await Promise.all(seedPairs.map(sym => bootstrapPair(sym, S.cfg.tf)));
+
+  // Remaining pairs: batch of 20 every 2s to avoid rate-limiting
+  bootstrapInBatches(restPairs, S.cfg.tf, 20, 2000);
 
   // Auto-load BTC chart on startup
   await openChart('BTCUSDT', S.cfg.tf);
@@ -108,12 +141,12 @@ async function init() {
 async function bootstrapPair(symbol, interval) {
   const key = `${symbol}_${interval}`;
   const [hist, htf] = await Promise.all([
-    fetchKlines(symbol, interval, 250),
-    fetchKlines(symbol, HTF, 250),          // HTF for engine MTF filter
+    fetchKlinesEx(symbol, interval, 250),
+    fetchKlinesEx(symbol, HTF, 60),     // HTF for engine MTF filter (smaller limit)
   ]);
   if (hist.length) {
     S.candles[key] = hist;
-    htfCandles[symbol] = htf;
+    if (htf.length) htfCandles[symbol] = htf;
 
     const ev = evaluate(hist, htf.length ? htf : null);
     if (ev) {
@@ -123,7 +156,27 @@ async function bootstrapPair(symbol, interval) {
       S.scanRows[key] = { key, sym: symbol, pair, tf: interval, ...ev };
     }
   }
-  startWS(symbol, interval);
+  startWSEx(symbol, interval);
+}
+
+/**
+ * Bootstrap a large list in batches to avoid hitting rate limits
+ * @param {string[]} pairs
+ * @param {string}   interval
+ * @param {number}   batchSize
+ * @param {number}   delayMs
+ */
+function bootstrapInBatches(pairs, interval, batchSize, delayMs) {
+  if (!pairs.length) return;
+  let offset = 0;
+  async function nextBatch() {
+    const batch = pairs.slice(offset, offset + batchSize);
+    if (!batch.length) return;
+    offset += batchSize;
+    await Promise.all(batch.map(sym => bootstrapPair(sym, interval)));
+    if (offset < pairs.length) setTimeout(nextBatch, delayMs);
+  }
+  setTimeout(nextBatch, delayMs); // first batch after initial delay
 }
 
 // ── Candle event handler ──────────────────────────────────
@@ -212,13 +265,31 @@ function updateSimStats() {
   if (setDD)  { setDD.textContent  = s.dd + '%'; setDD.style.color = parseFloat(s.dd) > 10 ? 'var(--sell)' : 'var(--buy)'; }
 }
 
+// ── Exchange toggle ───────────────────────────────────────
+
+function bindExchangeToggle() {
+  const sel = $('exchange-select');
+  if (!sel) return;
+  sel.value = activeExchange;
+  sel.addEventListener('change', () => {
+    activeExchange = sel.value;
+    localStorage.setItem(STORAGE_KEYS.exchange, activeExchange);
+    // Reload page to reinitialise streams on new exchange
+    if (confirm(`Switch to ${activeExchange.toUpperCase()}? The page will reload to connect new streams.`)) {
+      window.location.reload();
+    } else {
+      sel.value = activeExchange; // revert
+    }
+  });
+}
+
 // ── Price chart ───────────────────────────────────────────
 
 async function openChart(symbol, interval) {
   S.setChartSym(symbol);
   S.setChartTF(interval);
   const key = `${symbol}_${interval}`;
-  const cs  = S.candles[key]?.length ? S.candles[key] : await fetchKlines(symbol, interval, 120);
+  const cs  = S.candles[key]?.length ? S.candles[key] : await fetchKlinesEx(symbol, interval, 120);
   if (cs.length) {
     S.candles[key] = cs;
     buildPriceChart(cs, symbol, interval);

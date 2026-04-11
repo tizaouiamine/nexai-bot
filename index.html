@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src https://api.binance.com wss://stream.binance.com:9443 https://api.anthropic.com; img-src 'self' data:;">
+  content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src https://api.binance.com wss://stream.binance.com:9443 https://api.mexc.com wss://wbs.mexc.com https://api.anthropic.com; img-src 'self' data:;">
 <title>NEXAI — AI Trading Bot</title>
 <style>
 /* ── Reset ────────────────────────────────────────────── */
@@ -165,6 +165,10 @@ tr[data-sym]{cursor:pointer}
 
   <div class="header-right">
     <span class="status-dot"></span>
+    <select id="exchange-select" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 6px;font-size:11px;cursor:pointer">
+      <option value="binance">Binance</option>
+      <option value="mexc">MEXC</option>
+    </select>
     <span class="hstat">WS: <strong id="ws-count">0</strong></span>
     <span class="hstat">Signals: <strong id="sig-count">0</strong></span>
     <span id="bot-status" class="badge badge-buy">BOT ON</span>
@@ -194,7 +198,7 @@ tr[data-sym]{cursor:pointer}
 
       <!-- Live scanner -->
       <div class="card">
-        <div class="ctitle">Live Scanner <span style="color:var(--purple);font-size:9px">AI-filtered</span></div>
+        <div class="ctitle">Live Scanner <span style="color:var(--purple);font-size:9px">AI-filtered</span> <span id="pair-count" style="margin-left:auto;color:var(--muted);font-size:9px">0 pairs</span></div>
         <div class="scanner-wrap">
           <table>
             <thead>
