@@ -12,6 +12,8 @@
  */
 
 import { SEED_PAIRS, STORAGE_KEYS, fetchAllPairs, fetchMEXCPairs } from './config.js';
+import { initAuth, getUser, signInGoogle, sendEmailLink, signOut } from './auth.js';
+import { runTraining, applyWeights, trainingSummary, resetWeights, getWeights } from './training.js';
 import * as S from './state.js';
 import { detect }                                      from './strategy.js';
 import { evaluate, isTradeable }                       from './engine.js';
@@ -49,6 +51,101 @@ function startWSEx(symbol, interval) {
   else startWS(symbol, interval);
 }
 
+// ── Auth gate ─────────────────────────────────────────────
+
+function initAuthUI() {
+  initAuth();
+
+  // Auth state change → show/hide overlay
+  window.addEventListener('nexai:auth-ready',  e => handleAuthState(e.detail.user));
+  window.addEventListener('nexai:auth-change', e => handleAuthState(e.detail.user));
+
+  // Google button
+  $('auth-google-btn')?.addEventListener('click', async () => {
+    setAuthMsg('auth-main-msg', '');
+    try { await signInGoogle(); }
+    catch (e) { setAuthMsg('auth-main-msg', '✕ ' + (e.message ?? 'Sign-in failed'), 'err'); }
+  });
+
+  // Email trigger → show email step
+  $('auth-email-trigger-btn')?.addEventListener('click', () => {
+    showAuthStep('auth-step-email');
+    $('auth-email-input')?.focus();
+  });
+
+  // Send email link
+  $('auth-send-link-btn')?.addEventListener('click', async () => {
+    const email = $('auth-email-input')?.value?.trim();
+    if (!email || !email.includes('@')) {
+      setAuthMsg('auth-email-msg', 'Enter a valid email address', 'err'); return;
+    }
+    const btn = $('auth-send-link-btn');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    setAuthMsg('auth-email-msg', '');
+    try {
+      await sendEmailLink(email);
+      $('auth-sent-email').textContent = email;
+      showAuthStep('auth-step-sent');
+    } catch (e) {
+      setAuthMsg('auth-email-msg', '✕ ' + (e.message ?? 'Failed to send'), 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Send Login Link';
+    }
+  });
+
+  // Back buttons
+  $('auth-email-back')?.addEventListener('click', () => showAuthStep('auth-step-main'));
+  $('auth-sent-back')?.addEventListener('click', () => showAuthStep('auth-step-email'));
+
+  // Demo mode
+  $('auth-demo-btn')?.addEventListener('click', e => {
+    e.preventDefault();
+    // Dispatch a fake auth event for demo
+    window.dispatchEvent(new CustomEvent('nexai:auth-change', {
+      detail: { user: { uid: 'demo', displayName: 'Demo User', email: 'demo@nexai.local', isDemo: true } }
+    }));
+  });
+
+  // User pill → sign out
+  $('user-pill')?.addEventListener('click', () => {
+    if (confirm('Sign out?')) signOut();
+  });
+}
+
+function handleAuthState(user) {
+  const overlay = $('auth-overlay');
+  const app     = $('app');
+  if (user) {
+    overlay?.classList.add('hidden');
+    if (app) { app.style.display = 'block'; app.classList.add('ready'); }
+    updateUserPill(user);
+    // Init main app once (guard with flag)
+    if (!window._nexaiInited) { window._nexaiInited = true; init(); }
+  } else {
+    overlay?.classList.remove('hidden');
+    if (app) app.style.display = 'none';
+  }
+}
+
+function showAuthStep(id) {
+  document.querySelectorAll('.auth-step').forEach(s => s.classList.remove('active'));
+  $(id)?.classList.add('active');
+}
+
+function setAuthMsg(id, text, type = '') {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'auth-msg' + (type ? ' ' + type : '');
+}
+
+function updateUserPill(user) {
+  const name   = $('user-name');
+  const avatar = $('user-avatar');
+  if (name)   name.textContent   = user.displayName ?? user.email ?? 'User';
+  if (avatar) avatar.textContent = (user.displayName ?? user.email ?? '?')[0].toUpperCase();
+}
+
 // ── Init ─────────────────────────────────────────────────
 
 async function init() {
@@ -75,6 +172,8 @@ async function init() {
   bindTabs();
   bindBotToggle();
   bindBacktest();
+  bindTraining();
+  renderWeightsPanel(); // show any existing weights on load
 
   // Scanner row click → chart
   scannerTbody?.addEventListener('click', e => {
@@ -207,6 +306,10 @@ function onCandle(e) {
   // Paper trading bot (simulation mode, bot on)
   if (S.botOn && S.mode === 'simulation') {
     monitorTrades(key, candle.close, ev);
+
+    // Apply trained weights to adjust confidence
+    const weighted = applyWeights(ev);
+    Object.assign(ev, weighted);
 
     // Engine gate: only enter if AI filters pass
     if (isTradeable(ev, S.cfg.sigMin)) {
@@ -483,6 +586,99 @@ function bindChat() {
   });
 }
 
+// ── Training ──────────────────────────────────────────────
+
+function bindTraining() {
+  $('run-train-btn')?.addEventListener('click', async () => {
+    const tf    = $('train-tf')?.value    || '4h';
+    const count = parseInt($('train-pairs')?.value, 10) || 20;
+    const btn   = $('run-train-btn');
+
+    // Collect pairs to train (use scanRows keys + SEED_PAIRS)
+    const available = [
+      ...new Set([
+        ...SEED_PAIRS,
+        ...Object.values(S.scanRows).map(r => r.sym),
+      ]),
+    ].slice(0, count);
+
+    btn.disabled = true; btn.textContent = 'Training…';
+    $('train-progress-card').style.display  = '';
+    $('train-results').style.display        = 'none';
+
+    const result = await runTraining(available, tf, prog => {
+      const pct = prog.pairs > 0 ? Math.round(prog.done / prog.pairs * 100) : 0;
+      $('train-bar').style.width      = pct + '%';
+      $('train-pct-text').textContent = pct + '%';
+      $('train-status-text').textContent = `${prog.done}/${prog.pairs} pairs · ${prog.signals} signals`;
+    });
+
+    btn.disabled = false; btn.textContent = 'Run Training';
+
+    // Show results
+    $('train-results').style.display = 'grid';
+    $('tr-pairs').textContent   = result.trainedPairs;
+    $('tr-signals').textContent = result.totalSignals;
+    $('tr-factors').textContent = Object.keys(result.factors).length;
+    $('tr-status').textContent  = 'Complete ✓';
+
+    // Factor list
+    const list = $('train-factor-list');
+    if (list) {
+      list.innerHTML = '';
+      const sorted = Object.entries(result.factors).sort((a, b) => b[1].accuracy - a[1].accuracy);
+      for (const [factor, { accuracy, wins, total }] of sorted) {
+        const row   = document.createElement('div');
+        row.className = 'factor-row';
+        const color = accuracy >= 60 ? 'var(--buy)' : accuracy >= 45 ? 'var(--yellow)' : 'var(--sell)';
+        row.innerHTML = `
+          <span class="factor-name">${factor}</span>
+          <div class="factor-bar-bg"><div class="factor-bar" style="width:${accuracy}%;background:${color}"></div></div>
+          <span class="factor-acc" style="color:${color}">${accuracy}%</span>
+          <span style="color:var(--muted);font-size:10px">${wins}/${total}</span>
+        `;
+        list.appendChild(row);
+      }
+    }
+
+    renderWeightsPanel();
+  });
+
+  $('reset-weights-btn')?.addEventListener('click', () => {
+    if (confirm('Reset all learned weights? This cannot be undone.')) {
+      resetWeights();
+      renderWeightsPanel();
+      $('train-results').style.display       = 'none';
+      $('train-progress-card').style.display = 'none';
+    }
+  });
+}
+
+function renderWeightsPanel() {
+  const el = $('train-weights-list');
+  if (!el) return;
+  const w = getWeights();
+  const entries = Object.entries(w);
+  if (!entries.length) {
+    el.innerHTML = '<span style="color:var(--muted);font-style:italic">No training data yet. Run training first.</span>';
+    return;
+  }
+  el.innerHTML = '';
+  entries.sort((a, b) => b[1] - a[1]).forEach(([factor, weight]) => {
+    const pct   = (weight * 100).toFixed(0);
+    const color = weight >= 0.6 ? 'var(--buy)' : weight >= 0.45 ? 'var(--yellow)' : 'var(--sell)';
+    const row   = document.createElement('div');
+    row.className = 'factor-row';
+    row.innerHTML = `
+      <span class="factor-name">${factor}</span>
+      <div class="factor-bar-bg"><div class="factor-bar" style="width:${pct}%;background:${color}"></div></div>
+      <span class="factor-acc" style="color:${color}">${pct}%</span>
+    `;
+    el.appendChild(row);
+  });
+}
+
 // ── Start ─────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', init);
+// Auth runs immediately on load; init() is called after sign-in
+document.addEventListener('DOMContentLoaded', initAuthUI);
