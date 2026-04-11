@@ -27,7 +27,7 @@ export const DEFAULT_CFG = {
   trail:     0.015,   // Trailing stop %
   risk:      0.02,    // Risk per trade %
   maxTrades: 6,       // Max concurrent paper trades
-  minConf:   65,      // Minimum signal confidence
+  sigMin:    65,      // Minimum signal confidence (% threshold for bot entry)
   tf:        '4h',    // Primary timeframe
 };
 
