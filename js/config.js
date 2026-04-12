@@ -42,7 +42,7 @@ export const DEFAULT_CFG = {
   trail:     0.015,
   risk:      0.02,
   maxTrades: 6,
-  sigMin:    65,      // Minimum engine/confidence score for bot entry
+  sigMin:    55,      // Minimum engine/confidence score for bot entry
   tf:        '4h',
 };
 

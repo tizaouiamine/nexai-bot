@@ -210,17 +210,39 @@ async function init() {
     const input = $('paper-bal-input');
     const amount = parseFloat(input?.value);
     if (!isFinite(amount) || amount < 100) {
-      alert('Enter a valid balance (minimum $100)');
+      const btn = $('set-bal-btn');
+      if (btn) { btn.textContent = '✕ Min $100'; setTimeout(() => { btn.textContent = 'Set'; }, 1500); }
       return;
     }
-    if (!confirm(`Set paper balance to $${amount.toLocaleString()}? Open positions will be closed.`)) return;
-    S.setPaperBal(amount);
-    renderSimUI();
-    updateSimStats();
+    const ok = S.setPaperBal(amount);
+    if (ok) {
+      renderSimUI();
+      updateSimStats();
+      const btn = $('set-bal-btn');
+      if (btn) {
+        btn.textContent = '✓ Done';
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = 'Set'; btn.disabled = false; }, 1500);
+      }
+    }
   });
 
   // Wire exchange toggle
   bindExchangeToggle();
+
+  // Register global event listeners FIRST — must be active before any bootstrap
+  // so candle events and trade events are never missed even if bootstrap throws
+  window.addEventListener('nexai:candle',      onCandle);
+  window.addEventListener('nexai:trade-event', onTradeEvent);
+
+  // UI refresh loop — 2s tick (start before bootstrap so Live tab shows partial data)
+  setInterval(refreshUI, 2000);
+
+  // Insight rotator
+  rotateInsight();
+  setInterval(rotateInsight, 12000);
+
+  refreshHeaderStats({ wsCount: S.wsCount, sigTotal: S.sigTotal, botOn: S.botOn });
 
   // Fetch full pair list (all active USDT pairs from exchange info)
   const allPairs = activeExchange === 'mexc'
@@ -245,41 +267,43 @@ async function init() {
   // Auto-load BTC chart on startup
   await openChart('BTCUSDT', S.cfg.tf);
   updateChartLabel('BTCUSDT', S.cfg.tf);
-
-  // Register global event listeners
-  window.addEventListener('nexai:candle',      onCandle);
-  window.addEventListener('nexai:trade-event', onTradeEvent);
-
-  // UI refresh loop — 2s tick
-  setInterval(refreshUI, 2000);
-
-  // Insight rotator
-  rotateInsight();
-  setInterval(rotateInsight, 12000);
-
-  refreshHeaderStats({ wsCount: S.wsCount, sigTotal: S.sigTotal, botOn: S.botOn });
 }
 
 // ── Pair bootstrap ────────────────────────────────────────
 
 async function bootstrapPair(symbol, interval) {
   const key = `${symbol}_${interval}`;
-  const [hist, htf] = await Promise.all([
-    fetchKlinesEx(symbol, interval, 250),
-    fetchKlinesEx(symbol, HTF, 60),
-  ]);
-  if (hist.length) {
-    S.candles[key] = hist;
-    if (htf.length) htfCandles[symbol] = htf;
+  try {
+    const [hist, htf] = await Promise.all([
+      fetchKlinesEx(symbol, interval, 250),
+      fetchKlinesEx(symbol, HTF, 60),
+    ]);
+    if (hist.length) {
+      S.candles[key] = hist;
+      if (htf.length) htfCandles[symbol] = htf;
 
-    // Depth is fetched lazily (only for the charted pair) to avoid 300+ HTTP requests on startup
-    const ev = evaluate(hist, htf.length ? htf : null, null);
-    if (ev) {
-      S.sigs[key] = ev;
-      S.prices[symbol] = hist[hist.length - 1].close;
+      const price = hist[hist.length - 1].close;
+      S.prices[symbol] = price;
       const pair = symbol.replace('USDT', '/USDT');
-      S.scanRows[key] = { key, sym: symbol, pair, tf: interval, ...ev };
+
+      // Wrap evaluate() — a bug in the AI engine must not silently kill the scanner
+      let ev = null;
+      try {
+        ev = evaluate(hist, htf.length ? htf : null, null);
+      } catch (evalErr) {
+        console.warn(`[Bootstrap] evaluate() error for ${key}:`, evalErr.message);
+      }
+
+      if (ev) {
+        S.sigs[key] = ev;
+        S.scanRows[key] = { key, sym: symbol, pair, tf: interval, ...ev };
+      } else {
+        // Minimal row so pair appears in scanner even without a signal
+        S.scanRows[key] = { key, sym: symbol, pair, tf: interval, price, sig: 'NEUTRAL', conf: 0, dir: null, engineScore: 0 };
+      }
     }
+  } catch (err) {
+    console.warn(`[Bootstrap] ${key} failed:`, err.message);
   }
   startWSEx(symbol, interval);
 }
@@ -315,7 +339,13 @@ function onCandle(e) {
 
   // Full AI engine evaluation (with MTF + depth)
   const dScore = depthCache[symbol] ? depthScore(depthCache[symbol]) : null;
-  const ev     = evaluate(cs, htfCandles[symbol] ?? null, dScore);
+  let ev;
+  try {
+    ev = evaluate(cs, htfCandles[symbol] ?? null, dScore);
+  } catch (evalErr) {
+    console.warn(`[onCandle] evaluate() error for ${key}:`, evalErr.message);
+    return;
+  }
   if (!ev) return;
 
   S.sigs[key]      = ev;
