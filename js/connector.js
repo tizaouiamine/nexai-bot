@@ -72,14 +72,15 @@ async function signHMAC(secret, body) {
 
 /**
  * Send a trade signal to the configured webhook
+ * @param {string}         symbol  - e.g. 'BTCUSDT'
  * @param {EnrichedSignal} signal  - from engine.js evaluate()
  * @param {number}         price   - Current candle close price
  * @param {Object}         trade   - Paper trade object from paper.js tryEnter()
  * @returns {Promise<{ ok: boolean, response?: any, error?: string }>}
  */
-export async function sendSignal(signal, price, trade) {
+export async function sendSignal(symbol, signal, price, trade) {
   const payload = {
-    symbol:      signal.rsns?.[0] ?? 'UNKNOWN',   // fallback
+    symbol,
     action:      signal.dir === 'LONG' ? 'BUY' : 'SELL',
     side:        signal.dir,
     price,

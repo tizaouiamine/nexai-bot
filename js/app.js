@@ -12,10 +12,9 @@
  */
 
 import { SEED_PAIRS, STORAGE_KEYS, fetchAllPairs, fetchMEXCPairs } from './config.js';
-import { initAuth, getUser, signInGoogle, sendEmailLink, signOut } from './auth.js';
-import { runTraining, applyWeights, trainingSummary, resetWeights, getWeights } from './training.js';
+import { initAuth, signInGoogle, sendEmailLink, signOut } from './auth.js';
+import { runTraining, applyWeights, resetWeights, getWeights } from './training.js';
 import * as S from './state.js';
-import { detect }                                      from './strategy.js';
 import { evaluate, isTradeable }                       from './engine.js';
 import { fetchKlines, startWS }                        from './binance.js';
 import { fetchKlinesMEXC, startWSMEXC }                from './mexc.js';
@@ -23,12 +22,11 @@ import { tryEnter, monitorTrades, closeAllTrades, paperStats } from './paper.js'
 import { runBacktest }                                 from './backtest.js';
 import {
   renderScanner, renderOpenPos, renderSimHist,
-  renderBT, addSigFeed, refreshHeaderStats, rotateInsight,
+  renderBT, addSigFeed, refreshHeaderStats, rotateInsight, renderForecastPanel,
 } from './ui.js';
-import { sendChat } from './chat.js';
-import { fetchDepth, depthScore } from './depth.js';
-import { projectEntries } from './forecast.js';
-import { renderForecastPanel } from './ui.js';
+import { sendChat }                                    from './chat.js';
+import { fetchDepth, depthScore }                      from './depth.js';
+import { projectEntries }                              from './forecast.js';
 import { loadConnectorCfg, saveConnectorCfg, sendSignal, connectorCfg } from './connector.js';
 
 // ── DOM cache ─────────────────────────────────────────────
@@ -208,6 +206,19 @@ async function init() {
     renderSimUI();
   });
 
+  $('set-bal-btn')?.addEventListener('click', () => {
+    const input = $('paper-bal-input');
+    const amount = parseFloat(input?.value);
+    if (!isFinite(amount) || amount < 100) {
+      alert('Enter a valid balance (minimum $100)');
+      return;
+    }
+    if (!confirm(`Set paper balance to $${amount.toLocaleString()}? Open positions will be closed.`)) return;
+    S.setPaperBal(amount);
+    renderSimUI();
+    updateSimStats();
+  });
+
   // Wire exchange toggle
   bindExchangeToggle();
 
@@ -253,18 +264,16 @@ async function init() {
 
 async function bootstrapPair(symbol, interval) {
   const key = `${symbol}_${interval}`;
-  const [hist, htf, depth] = await Promise.all([
+  const [hist, htf] = await Promise.all([
     fetchKlinesEx(symbol, interval, 250),
     fetchKlinesEx(symbol, HTF, 60),
-    activeExchange === 'binance' ? fetchDepth(symbol).catch(() => null) : Promise.resolve(null),
   ]);
   if (hist.length) {
     S.candles[key] = hist;
     if (htf.length) htfCandles[symbol] = htf;
-    if (depth) depthCache[symbol] = depth;
 
-    const dScore = depth ? depthScore(depth) : null;
-    const ev     = evaluate(hist, htf.length ? htf : null, dScore);
+    // Depth is fetched lazily (only for the charted pair) to avoid 300+ HTTP requests on startup
+    const ev = evaluate(hist, htf.length ? htf : null, null);
     if (ev) {
       S.sigs[key] = ev;
       S.prices[symbol] = hist[hist.length - 1].close;
@@ -336,17 +345,12 @@ function onCandle(e) {
         console.info(`[Bot] ${ev.dir} entered on ${key} @ ${candle.close} | score=${ev.engineScore} regime=${ev.regime}`);
         // Fire real trade connector (if configured)
         if (connectorCfg.enabled && connectorCfg.webhookUrl) {
-          sendSignal(ev, candle.close, result.trade)
+          sendSignal(symbol, ev, candle.close, result.trade)
             .then(r => updateConnectorStatus(r))
             .catch(e => console.warn('[Connector]', e));
         }
       }
     }
-  }
-
-  // Refresh depth cache every ~2 minutes on the primary pair
-  if (symbol === S.chartSym && activeExchange === 'binance') {
-    fetchDepth(symbol).then(d => { if (d) depthCache[symbol] = d; }).catch(() => {});
   }
 
   // Update chart if this is the currently viewed pair
@@ -425,6 +429,11 @@ async function openChart(symbol, interval) {
   if (cs.length) {
     S.candles[key] = cs;
     buildPriceChart(cs, symbol, interval);
+
+    // Fetch order book depth lazily — only for the pair the user is viewing
+    if (activeExchange === 'binance') {
+      fetchDepth(symbol).then(d => { if (d) depthCache[symbol] = d; }).catch(() => {});
+    }
 
     // Render forecast panel for this pair
     const currentSig = S.sigs[key] ?? null;
@@ -754,7 +763,7 @@ function bindConnector() {
     }
     testBtn.disabled = true; testBtn.textContent = 'Testing…';
     const testSig = { dir: 'LONG', sig: 'TEST', conf: 99, engineScore: 99, regime: 'bull', pattern: 'Test', rsns: ['TEST'] };
-    const result  = await sendSignal(testSig, 99999, { size: 100 });
+    const result  = await sendSignal('BTCUSDT', testSig, 99999, { size: 100 });
     testBtn.disabled = false; testBtn.textContent = 'Test';
     updateConnectorStatus(result);
   });

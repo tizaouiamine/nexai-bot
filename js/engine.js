@@ -245,8 +245,8 @@ export function evaluate(cs, csHTF = null, depthData = null) {
     filters.push('— MTF: no higher-TF data');
   }
 
-  // ── 6. Confluence minimum (raised to 60, requiring stronger conviction) ──
-  if (base.conf < 60) {
+  // ── 6. Confluence minimum (55% = at least 2 strong factors aligned) ──
+  if (base.conf < 55) {
     blocked = blocked ?? `Low confluence: ${base.conf}%`;
     filters.push(`❌ Confluence too low: ${base.conf}%`);
   } else {

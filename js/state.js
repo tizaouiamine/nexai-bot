@@ -67,3 +67,13 @@ export function resetPaper() {
   paper.peak   = 10000;
   savePaper();
 }
+
+export function setPaperBal(amount) {
+  const n = parseFloat(amount);
+  if (!isFinite(n) || n < 100) return false;
+  paper.bal    = n;
+  paper.peak   = Math.max(paper.peak, n);
+  paper.open   = [];   // close all open positions when balance resets
+  savePaper();
+  return true;
+}
