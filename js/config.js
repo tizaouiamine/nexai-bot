@@ -62,9 +62,11 @@ export const IND = {
 };
 
 export const STORAGE_KEYS = {
-  paper:    'nexai_paper',
-  apiKey:   'nexai_key',
-  exchange: 'nexai_exchange',
+  paper:     'nexai_paper',
+  apiKey:    'nexai_key',
+  exchange:  'nexai_exchange',
+  mode:      'nexai_mode',
+  connector: 'nexai_connector',
 };
 
 // ── Exclude non-tradable symbols ─────────────────────────

@@ -93,6 +93,12 @@ export async function runBacktest(symbol, interval, limit = 500) {
             if (price >= open.sl) { closeReason = 'Trail Stop'; closePrice = open.sl; }
           }
         }
+
+        // 5. Signal reversal (only after TP1 — protect profits)
+        const sig = detect(history);
+        if (open.tp1h && !closeReason && sig?.dir && sig.dir !== open.dir && sig.conf >= cfg.sigMin) {
+          closeReason = 'Signal Reversal';
+        }
       }
 
       if (closeReason) {

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy"
-  content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline'; connect-src https://api.binance.com wss://stream.binance.com:9443 https://api.mexc.com wss://wbs.mexc.com https://api.anthropic.com https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; img-src 'self' data: https:; frame-src https://accounts.google.com;">
+  content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline'; connect-src https://api.binance.com wss://stream.binance.com:9443 https://api.mexc.com wss://wbs.mexc.com https://api.anthropic.com https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com http://localhost:3000 http://127.0.0.1:3000; img-src 'self' data: https:; frame-src https://accounts.google.com;">
 <title>NEXAI — AI Trading Bot</title>
 <style>
 /* ── Reset ─────────────────────────────────────────── */
@@ -150,6 +150,24 @@ tr[data-sym]{cursor:pointer}
 .feed-left,.feed-right{display:flex;align-items:center;gap:5px}
 .feed-left   {margin-bottom:2px}.feed-pair{font-weight:700}
 .feed-tf,.feed-conf,.feed-price,.feed-reasons{font-size:10px;color:var(--muted)}
+
+/* ── Scanner score bar ──────────────────────────────────── */
+.score-bar-bg{width:50px;height:5px;background:var(--bg4);border-radius:3px;display:inline-block;vertical-align:middle;margin-right:4px}
+.score-bar-fill{height:100%;border-radius:3px;transition:width .3s}
+.score-num{font-size:10px;vertical-align:middle}
+
+/* ── Forecast panel ─────────────────────────────────────── */
+.forecast-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.forecast-title{font-size:11px;font-weight:700;color:var(--blue)}
+.forecast-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:4px;border:1px solid var(--border);background:var(--bg3)}
+.forecast-long{border-left:3px solid var(--buy)}.forecast-short{border-left:3px solid var(--sell)}
+.forecast-left,.forecast-right{display:flex;flex-direction:column;gap:2px}
+.forecast-price{font-size:12px;font-weight:700}
+.forecast-label{font-size:10px;color:var(--muted)}
+.forecast-conf{font-size:11px;font-weight:600}
+.forecast-dist{font-size:10px}
+.forecast-reasons{width:100%;font-size:10px;color:var(--muted);margin-top:3px;padding-top:3px;border-top:1px solid rgba(30,48,80,.4)}
+.forecast-empty{font-size:11px;color:var(--muted);padding:8px 0;font-style:italic}
 
 /* ── Backtest ───────────────────────────────────────────── */
 .bt-config  {display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px}
@@ -324,7 +342,7 @@ tr[data-sym]{cursor:pointer}
         </div>
         <div class="scanner-wrap">
           <table>
-            <thead><tr><th>Pair</th><th>TF</th><th>Price</th><th>Conf</th><th>Signal</th><th>RSI</th><th>Trend</th></tr></thead>
+            <thead><tr><th>Pair</th><th>TF</th><th>Price</th><th>Conf</th><th>Signal</th><th>RSI</th><th>Trend</th><th>Score</th><th>SL%</th><th>Pattern</th></tr></thead>
             <tbody id="scanner-tbody"></tbody>
           </table>
         </div>
@@ -333,6 +351,10 @@ tr[data-sym]{cursor:pointer}
       <div class="card">
         <div class="ctitle">Signal Feed <span style="color:var(--muted);font-size:9px">≥55% confidence</span></div>
         <div id="signal-feed" style="max-height:180px;overflow-y:auto"></div>
+      </div>
+
+      <div class="card">
+        <div id="forecast-panel" style="min-height:60px"></div>
       </div>
     </section>
 
@@ -492,8 +514,31 @@ tr[data-sym]{cursor:pointer}
       <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.6">
         <strong style="color:var(--purple)">AI Filters active:</strong><br>
         ✅ EMA 200 regime · ✅ ATR SL/TP<br>
-        ✅ Candle patterns · ✅ Vol gate<br>
-        ✅ Multi-TF (1D) · ✅ Trained weights
+        ✅ Candle patterns · ✅ Vol spike gate<br>
+        ✅ Multi-TF (1D, blocks conflict) · ✅ Trained weights<br>
+        ✅ S/R + Fibonacci · ✅ RSI/MACD divergence
+      </div>
+    </div>
+
+    <div class="panel-sec">
+      <div class="ptitle">Bot Connector <span style="color:var(--muted);font-size:9px">(Webhook)</span></div>
+      <div class="cfg-row">
+        <span class="cfg-label">Enable</span>
+        <input id="connector-enabled" type="checkbox" style="cursor:pointer;width:14px;height:14px">
+      </div>
+      <div class="cfg-row">
+        <span class="cfg-label">Dry Run</span>
+        <input id="connector-dryrun" type="checkbox" checked style="cursor:pointer;width:14px;height:14px">
+      </div>
+      <div style="margin-bottom:6px">
+        <input id="connector-url" class="key-input" type="text" placeholder="https://my-server.com/trade" style="font-size:11px;width:100%">
+      </div>
+      <div style="margin-bottom:6px">
+        <input id="connector-secret" class="key-input" type="password" placeholder="Webhook secret (optional HMAC)" style="font-size:11px;width:100%" autocomplete="off">
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <button id="connector-test-btn" class="btn" style="font-size:10px;padding:3px 8px">Test</button>
+        <span id="connector-status" style="font-size:10px;color:var(--muted)">—</span>
       </div>
     </div>
 

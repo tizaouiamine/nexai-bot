@@ -15,6 +15,7 @@
 
 import { apiKey, sigs, prices, paper, mode } from './state.js';
 import { paperStats } from './paper.js';
+import { trainingSummary } from './training.js';
 
 const MODEL   = 'claude-haiku-4-5-20251001';
 const API_URL = 'https://api.anthropic.com/v1/messages';
@@ -26,39 +27,88 @@ let pending  = false;
 // ── System prompt builder ────────────────────────────────
 
 function buildSystemPrompt() {
-  const topSignals = Object.entries(sigs)
+  // Top 5 signals with full engine context (put most critical data last — Raschka ch.3)
+  const topSigs = Object.entries(sigs)
     .filter(([, s]) => s?.dir)
-    .sort(([, a], [, b]) => (b.conf ?? 0) - (a.conf ?? 0))
-    .slice(0, 5)
-    .map(([key, s]) => `${key}: ${s.sig} (${s.conf}%) RSI=${s.rsi} MACD=${s.macdH?.toFixed(4)}`)
-    .join('\n');
+    .sort(([, a], [, b]) => (b.engineScore ?? b.conf ?? 0) - (a.engineScore ?? a.conf ?? 0))
+    .slice(0, 5);
 
-  const topPrices = Object.entries(prices)
-    .slice(0, 8)
-    .map(([sym, p]) => `${sym}: $${p}`)
-    .join(', ');
+  const sigLines = topSigs.map(([key, s]) => {
+    const parts = [
+      `${key}: ${s.sig} conf=${s.conf}% score=${s.engineScore ?? '—'}`,
+      `RSI=${s.rsi?.toFixed(1) ?? '—'}`,
+      `MACD=${s.macdH?.toFixed(4) ?? '—'}`,
+      `regime=${s.regime ?? '—'}`,
+      `pattern=${s.pattern ?? 'none'}`,
+      s.mtfConfirm ? 'MTF=✓' : 'MTF=✗',
+    ];
+    // Include divergence flags if present
+    if (s.rsns?.includes('RSI Bull Divergence')) parts.push('DIVERGENCE:BULL');
+    if (s.rsns?.includes('RSI Bear Divergence')) parts.push('DIVERGENCE:BEAR');
+    if (s.rsns?.includes('MACD Momentum Fading')) parts.push('MOMENTUM:FADING');
+    return parts.join(' | ');
+  }).join('\n') || 'Scanning…';
 
+  // Top 5 prices
+  const topPrices = Object.entries(prices).slice(0, 5)
+    .map(([sym, p]) => `${sym}=$${p?.toFixed ? p.toFixed(2) : p}`).join(' | ');
+
+  // Portfolio stats
   const stats   = paperStats();
-  const openPos = paper.open
-    .map(t => `${t.pair} ${t.dir} entry=$${t.entry?.toFixed(2)} sl=$${t.sl?.toFixed(2)}`)
-    .join(', ') || 'None';
+  const balance = stats.totalBal?.toFixed(2) ?? '—';
+  const openPos = paper.open.length
+    ? paper.open.map(t => {
+        const pp = t.dir === 'LONG'
+          ? ((t.cur - t.entry) / t.entry * 100).toFixed(2)
+          : ((t.entry - t.cur) / t.entry * 100).toFixed(2);
+        return `${t.pair} ${t.dir} @$${t.entry?.toFixed(2)} P&L=${pp}% SL=$${t.sl?.toFixed(2)} TP2=$${t.tp2?.toFixed(2)}`;
+      }).join('\n')
+    : 'None';
 
-  return `You are NEXAI — an expert crypto trading AI assistant embedded in a live trading dashboard.
-Current mode: ${mode.toUpperCase()}
-Live prices: ${topPrices || 'Loading…'}
+  // ATR and regime for top pair (if available)
+  const topPair = topSigs[0]?.[1];
+  const topPairKey = topSigs[0]?.[0] ?? '';
+  const regimeLine = topPair
+    ? `Top pair ${topPairKey.split('_')[0]}: regime=${topPair.regime} ATR=${topPair.atr?.toFixed(4) ?? '—'} ATR-SL=${topPair.atrSL?.toFixed(4) ?? '—'}`
+    : '';
 
-Top signals (EMA/RSI/MACD/BB confluence):
-${topSignals || 'Scanning…'}
+  // Training insights (top 3 best factors + worst 1)
+  let trainLine = '';
+  try {
+    const summary = trainingSummary();
+    if (summary.totalFactors > 0) {
+      trainLine = `Trained factors (${summary.totalFactors} total): Best=${summary.bestFactors.slice(0,2).join(', ')} | Worst=${summary.worstFactors[0] ?? '—'}`;
+    }
+  } catch (_) {}
 
-Paper portfolio: Balance=$${stats.totalBal?.toFixed(2)} | Win rate=${stats.wr}% | Open: ${openPos}
+  // NOTE: Most critical data placed last (Claude attends to recent tokens most strongly)
+  return `You are NEXAI — an expert crypto trading AI assistant with access to live market data.
+Mode: ${mode.toUpperCase()} | ${new Date().toUTCString()}
 
-Rules:
-- Give concise, actionable trading insights
-- Always mention risk management
-- Reference the live data above when relevant
+## Live Prices
+${topPrices || 'Loading…'}
+
+## Paper Portfolio
+Balance=$${balance} | Win Rate=${stats.wr}% | Trades=${stats.tot} | Max DD=${stats.dd}%
+Open positions:
+${openPos}
+
+## AI Training Insights
+${trainLine || 'No training data yet.'}
+
+## Market Regime + ATR
+${regimeLine || '—'}
+
+## Top Signals (engineScore | conf | regime | pattern | MTF)
+${sigLines}
+
+## Rules
+- Give concise, actionable analysis grounded in the live data above
+- Always mention SL/TP levels from the signal data when relevant
+- Flag divergences (RSI Bull/Bear Divergence, MACD Fading) explicitly — they predict reversals
+- Reference regime (bull/bear/ranging) before suggesting direction
 - Never guarantee profits — crypto is high-risk
-- If asked about a specific coin, use the signal data if available
-- Keep responses under 200 words unless asked for more detail`;
+- Keep responses under 250 words unless asked for more detail`;
 }
 
 // ── DOM helpers ──────────────────────────────────────────

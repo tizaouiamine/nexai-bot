@@ -15,6 +15,7 @@
 
 import { detect }        from './strategy.js';
 import { calcEMA, calcBB } from './indicators.js';
+import { findSwingLevels, autoFibLevels, nearFibLevel, nearestSupport, nearestResistance } from './levels.js';
 
 // ── ATR calculation ───────────────────────────────────────
 
@@ -107,17 +108,19 @@ function candlePattern(cs) {
 // ── Volatility gate ───────────────────────────────────────
 
 /**
- * True if current volatility is abnormally high (skip choppy entries)
- * @param {number[]} closes
+ * True if current candle range is abnormally large (spike candle gate)
+ * Uses candle body ranges (high-low), not close-to-close, to avoid blocking trending moves.
+ * Taleb (Black Swan): fat-tail events are real — don't trade INTO a spike candle.
+ * @param {{ high, low }[]} cs
  * @returns {boolean}
  */
-function isVolatilitySpike(closes) {
-  if (closes.length < 30) return false;
-  const recent  = closes.slice(-5).map((v, i, arr) => i === 0 ? 0 : Math.abs(v - arr[i-1]) / arr[i-1] * 100);
-  const baseline = closes.slice(-30, -5).map((v, i, arr) => i === 0 ? 0 : Math.abs(v - arr[i-1]) / arr[i-1] * 100);
-  const avgRecent   = recent.reduce((a, b) => a + b, 0) / recent.length;
-  const avgBaseline = baseline.reduce((a, b) => a + b, 0) / baseline.length;
-  return avgRecent > avgBaseline * 3.5; // current move is 3.5× normal
+function isVolatilitySpike(cs) {
+  if (cs.length < 21) return false;
+  const ranges = cs.slice(-21).map(c => c.high - c.low);
+  const last   = ranges[ranges.length - 1];
+  const sorted = ranges.slice(0, -1).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return median > 0 && last > median * 4; // spike candle: range > 4× median
 }
 
 // ── Main engine ───────────────────────────────────────────
@@ -125,8 +128,9 @@ function isVolatilitySpike(closes) {
 /**
  * Evaluate a full trade decision with AI filters
  *
- * @param {{ high, low, close, volume }[]} cs  - Primary TF candles
+ * @param {{ high, low, close, volume }[]} cs       - Primary TF candles
  * @param {{ high, low, close, volume }[]|null} csHTF - Higher TF candles (optional, for MTF)
+ * @param {{ bonus: number, flags: string[], spread: number }|null} depthData - Order book depth score (optional)
  * @returns {EnrichedSignal|null}
  *
  * @typedef {Object} EnrichedSignal
@@ -144,8 +148,9 @@ function isVolatilitySpike(closes) {
  * @property {string}  pattern       - Candle pattern name or null
  * @property {boolean} mtfConfirm    - Higher TF alignment
  * @property {string[]} filters      - Filter verdicts for transparency
+ * @property {Object|null} levels    - S/R and Fib data for forecast panel
  */
-export function evaluate(cs, csHTF = null) {
+export function evaluate(cs, csHTF = null, depthData = null) {
   if (!cs || cs.length < 50) return null;
 
   const closes = cs.map(c => c.close);
@@ -154,6 +159,11 @@ export function evaluate(cs, csHTF = null) {
   // ── Base signal ────────────────────────────────────────
   const base = detect(cs);
   if (!base || !base.dir) return { ...base, tradeable: false, blockReason: 'No directional signal', engineScore: 0, filters: [] };
+
+  // Require at least 2 independent factor reasons (not just score)
+  if (!base.rsns || base.rsns.filter(r => r !== 'MACD Momentum Fading').length < 2) {
+    return { ...base, tradeable: false, blockReason: 'Insufficient confluent factors', engineScore: 0, filters: ['❌ Fewer than 2 independent signal factors'] };
+  }
 
   const filters   = [];
   let   blocked   = null;
@@ -207,16 +217,16 @@ export function evaluate(cs, csHTF = null) {
     filters.push('— No candle pattern');
   }
 
-  // ── 4. Volatility gate ─────────────────────────────────
-  if (isVolatilitySpike(closes)) {
-    blocked = blocked ?? 'Abnormal volatility spike — skip';
-    filters.push('❌ Volatility spike detected');
+  // ── 4. Volatility gate (uses candle range, not close-to-close) ──────────
+  if (isVolatilitySpike(cs)) {
+    blocked = blocked ?? 'Spike candle — range > 4× median (Taleb: skip fat-tail entry)';
+    filters.push('❌ Volatility spike: candle range > 4× median');
   } else {
     filters.push('✅ Volatility normal');
     scoreBonus += 8;
   }
 
-  // ── 5. Multi-timeframe confirmation ────────────────────
+  // ── 5. Multi-timeframe confirmation (conflict now BLOCKS) ──────────────
   let mtfConfirm = false;
   if (csHTF && csHTF.length >= 50) {
     const htfSig = detect(csHTF);
@@ -225,8 +235,9 @@ export function evaluate(cs, csHTF = null) {
       filters.push(`✅ MTF confirm: ${htfSig.sig} (${htfSig.conf}%)`);
       scoreBonus += 20;
     } else if (htfSig?.dir && htfSig.dir !== base.dir) {
-      filters.push(`⚠️ MTF conflict: HTF says ${htfSig.dir}`);
-      scoreBonus -= 10;
+      // BLOCK — counter-trend trades have poor expectancy (Murphy ch. 3)
+      blocked = blocked ?? `MTF conflict: HTF=${htfSig.dir} opposes LTF=${base.dir}`;
+      filters.push(`❌ MTF conflict: HTF says ${htfSig.dir} — BLOCKED`);
     } else {
       filters.push('— MTF neutral / no data');
     }
@@ -234,12 +245,54 @@ export function evaluate(cs, csHTF = null) {
     filters.push('— MTF: no higher-TF data');
   }
 
-  // ── 6. Confluence minimum (≥ 40 base score means ≥2 strong factors) ──
-  if (base.conf < 55) {
+  // ── 6. Confluence minimum (raised to 60, requiring stronger conviction) ──
+  if (base.conf < 60) {
     blocked = blocked ?? `Low confluence: ${base.conf}%`;
     filters.push(`❌ Confluence too low: ${base.conf}%`);
   } else {
     filters.push(`✅ Confluence: ${base.conf}%`);
+  }
+
+  // ── 7. Support/Resistance + Fibonacci sweet-spot ──────────────────────
+  const swingLevels = findSwingLevels(cs, 100);
+  const fibs        = autoFibLevels(cs, 60);
+  let   levelsData  = { supports: swingLevels.supports, resistances: swingLevels.resistances, fibs };
+
+  // Fib sweet-spot bonus (Murphy: 50% & 61.8% retrace = highest-probability reversal)
+  const fibHit = nearFibLevel(price, fibs, 0.5);
+  if (fibHit) {
+    filters.push(`✅ Fib level: ${fibHit.name} (+${fibHit.bonus}pts)`);
+    scoreBonus += fibHit.bonus;
+    levelsData.activeFib = fibHit;
+  }
+
+  // S/R proximity bonus
+  if (base.dir === 'LONG') {
+    const sup = nearestSupport(price, swingLevels.supports);
+    if (sup && sup.distPct <= 0.5) {
+      filters.push(`✅ Near swing support $${sup.level.toFixed(2)} (${sup.distPct}%)`);
+      scoreBonus += 10;
+      levelsData.nearSupport = sup;
+    }
+    // Structural risk: entering just above resistance (likely to get rejected)
+    const res = nearestResistance(price, swingLevels.resistances);
+    if (res && res.distPct <= 0.3) {
+      filters.push(`⚠️ Near resistance $${res.level.toFixed(2)} — structural risk`);
+      scoreBonus -= 8;
+    }
+  } else if (base.dir === 'SHORT') {
+    const res = nearestResistance(price, swingLevels.resistances);
+    if (res && res.distPct <= 0.5) {
+      filters.push(`✅ Near swing resistance $${res.level.toFixed(2)} (${res.distPct}%)`);
+      scoreBonus += 10;
+      levelsData.nearResistance = res;
+    }
+  }
+
+  // ── 8. Order book depth score (optional) ──────────────────────────────
+  if (depthData) {
+    scoreBonus += depthData.bonus ?? 0;
+    depthData.flags?.forEach(f => filters.push(f));
   }
 
   // ── Composite engine score ─────────────────────────────
@@ -253,6 +306,7 @@ export function evaluate(cs, csHTF = null) {
     tradeable: !blocked && engineScore >= 45,
     blockReason: blocked ?? null,
     filters,
+    levels: levelsData,
   };
 }
 

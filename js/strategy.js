@@ -2,15 +2,18 @@
  * strategy.js — Multi-factor signal detection engine
  *
  * Strategy: EMA 9/21 crossover + RSI(14) + MACD(12/26/9) + Bollinger Bands(20,2) + Volume MA
+ * + RSI divergence + MACD histogram momentum fade
  * Methodology: Multi-timeframe confluence (SIFT + triangulation)
  * Reference: ressources/research-methodology.md
  *
- * Scoring system (max ~82 pts, normalized to 0–97%):
- *   EMA cross/trend : 30 pts (strongest signal)
- *   RSI condition   : 20 pts
- *   MACD condition  : 20 pts
- *   Bollinger Bands : 10 pts
- *   Volume confirm  : 10 pts  (conditional)
+ * Scoring system (max ~100 pts, normalized to 0–97%):
+ *   EMA cross/trend      : 30 pts (strongest signal)
+ *   RSI condition        : 20 pts
+ *   MACD condition       : 20 pts
+ *   Bollinger Bands      : 10 pts
+ *   Volume confirm       : 10 pts (conditional)
+ *   RSI divergence       : +18 pts bonus (high-reliability reversal signal)
+ *   MACD momentum fade   : -12 pts penalty (momentum exhaustion warning)
  */
 
 import { calcEMA, calcRSI, calcMACD, calcBB } from './indicators.js';
@@ -96,8 +99,44 @@ export function detect(cs) {
     else         { ss += 10; rsns.push('Vol Spike Confirms'); }
   }
 
+  // ── 6. RSI Divergence (+18 pts) ──────────────────────
+  // Requires at least 10 candles + full RSI array
+  if (n >= 9 && cs[n].low != null && cs[n - 5].low != null) {
+    const rsiN = r[n];
+    const rsiP = r[n - 5];
+    if (rsiN != null && rsiP != null) {
+      // Bullish divergence: price makes lower low, RSI makes higher low
+      const priceLowerLow  = cs[n].low  < cs[n - 5].low;
+      const rsiHigherLow   = rsiN       > rsiP;
+      if (priceLowerLow && rsiHigherLow) {
+        ls += 18;
+        rsns.push('RSI Bull Divergence');
+      }
+      // Bearish divergence: price makes higher high, RSI makes lower high
+      const priceHigherHigh = cs[n].high > cs[n - 5].high;
+      const rsiLowerHigh    = rsiN       < rsiP;
+      if (priceHigherHigh && rsiLowerHigh) {
+        ss += 18;
+        rsns.push('RSI Bear Divergence');
+      }
+    }
+  }
+
+  // ── 7. MACD Histogram Momentum Fade (-12 pts penalty) ──
+  // 3 consecutive candles of shrinking histogram in the dominant direction
+  const mh = m.hist;
+  if (mh.length >= n - 2 && mh[n] != null && mh[n - 1] != null && mh[n - 2] != null) {
+    const fadingBull = mh[n] < mh[n - 1] && mh[n - 1] < mh[n - 2] && mh[n - 2] > 0 && ls > ss;
+    const fadingBear = mh[n] > mh[n - 1] && mh[n - 1] > mh[n - 2] && mh[n - 2] < 0 && ss > ls;
+    if (fadingBull || fadingBear) {
+      if (fadingBull) ls = Math.max(0, ls - 12);
+      else            ss = Math.max(0, ss - 12);
+      rsns.push('MACD Momentum Fading');
+    }
+  }
+
   // ── Normalize confidence ──────────────────────────────
-  const MAX_SCORE = 82;
+  const MAX_SCORE = 100;
   const top  = Math.max(ls, ss);
   const conf = Math.min(Math.round(top / MAX_SCORE * 100), 97);
   const trend = ce9 > ce21 ? 'Bullish' : 'Bearish';

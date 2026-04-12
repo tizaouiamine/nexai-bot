@@ -26,16 +26,22 @@ import {
   renderBT, addSigFeed, refreshHeaderStats, rotateInsight,
 } from './ui.js';
 import { sendChat } from './chat.js';
+import { fetchDepth, depthScore } from './depth.js';
+import { projectEntries } from './forecast.js';
+import { renderForecastPanel } from './ui.js';
+import { loadConnectorCfg, saveConnectorCfg, sendSignal, connectorCfg } from './connector.js';
 
 // ── DOM cache ─────────────────────────────────────────────
 const $  = id => document.getElementById(id);
-let scannerTbody, simOpenCont, simHistTbody, simStatsCont;
+let scannerTbody, simOpenCont, simHistTbody;
 let feedCont, chatMsgs, chatInput, btResultCont;
 let priceChart = null;
 
 // ── Per-pair HTF candle cache (for MTF engine) ────────────
-const htfCandles = {};  // 'BTCUSDT' → candle[] on '1d'
-const HTF        = '1d';
+const htfCandles  = {};     // 'BTCUSDT' → candle[] on '1d'
+const HTF         = '1d';
+const depthCache  = {};     // 'BTCUSDT' → depth data (30s TTL handled by depth.js)
+let   forecastCont = null;  // #forecast-panel DOM element
 
 // ── Active exchange ───────────────────────────────────────
 // 'binance' | 'mexc'
@@ -152,11 +158,11 @@ async function init() {
   scannerTbody  = $('scanner-tbody');
   simOpenCont   = $('sim-open');
   simHistTbody  = $('sim-hist-tbody');
-  simStatsCont  = $('sim-stats');
   feedCont      = $('signal-feed');
   chatMsgs      = $('chat-messages');
   chatInput     = $('chat-input');
   btResultCont  = $('bt-result');
+  forecastCont  = $('forecast-panel');
 
   // Restore API key
   const storedKey = localStorage.getItem(STORAGE_KEYS.apiKey);
@@ -173,7 +179,15 @@ async function init() {
   bindBotToggle();
   bindBacktest();
   bindTraining();
+  bindConnector();
   renderWeightsPanel(); // show any existing weights on load
+
+  // Restore last active tab
+  const savedMode = localStorage.getItem(STORAGE_KEYS.mode);
+  if (savedMode) {
+    const tabBtn = document.querySelector(`[data-tab="${savedMode}"]`);
+    tabBtn?.click();
+  }
 
   // Scanner row click → chart
   scannerTbody?.addEventListener('click', e => {
@@ -239,15 +253,18 @@ async function init() {
 
 async function bootstrapPair(symbol, interval) {
   const key = `${symbol}_${interval}`;
-  const [hist, htf] = await Promise.all([
+  const [hist, htf, depth] = await Promise.all([
     fetchKlinesEx(symbol, interval, 250),
-    fetchKlinesEx(symbol, HTF, 60),     // HTF for engine MTF filter (smaller limit)
+    fetchKlinesEx(symbol, HTF, 60),
+    activeExchange === 'binance' ? fetchDepth(symbol).catch(() => null) : Promise.resolve(null),
   ]);
   if (hist.length) {
     S.candles[key] = hist;
     if (htf.length) htfCandles[symbol] = htf;
+    if (depth) depthCache[symbol] = depth;
 
-    const ev = evaluate(hist, htf.length ? htf : null);
+    const dScore = depth ? depthScore(depth) : null;
+    const ev     = evaluate(hist, htf.length ? htf : null, dScore);
     if (ev) {
       S.sigs[key] = ev;
       S.prices[symbol] = hist[hist.length - 1].close;
@@ -287,8 +304,9 @@ function onCandle(e) {
   const cs = S.candles[key];
   if (!cs || cs.length < 50) return;
 
-  // Full AI engine evaluation (with MTF)
-  const ev = evaluate(cs, htfCandles[symbol] ?? null);
+  // Full AI engine evaluation (with MTF + depth)
+  const dScore = depthCache[symbol] ? depthScore(depthCache[symbol]) : null;
+  const ev     = evaluate(cs, htfCandles[symbol] ?? null, dScore);
   if (!ev) return;
 
   S.sigs[key]      = ev;
@@ -316,8 +334,19 @@ function onCandle(e) {
       const result = tryEnter(key, ev, candle.close);
       if (result.ok) {
         console.info(`[Bot] ${ev.dir} entered on ${key} @ ${candle.close} | score=${ev.engineScore} regime=${ev.regime}`);
+        // Fire real trade connector (if configured)
+        if (connectorCfg.enabled && connectorCfg.webhookUrl) {
+          sendSignal(ev, candle.close, result.trade)
+            .then(r => updateConnectorStatus(r))
+            .catch(e => console.warn('[Connector]', e));
+        }
       }
     }
+  }
+
+  // Refresh depth cache every ~2 minutes on the primary pair
+  if (symbol === S.chartSym && activeExchange === 'binance') {
+    fetchDepth(symbol).then(d => { if (d) depthCache[symbol] = d; }).catch(() => {});
   }
 
   // Update chart if this is the currently viewed pair
@@ -396,13 +425,18 @@ async function openChart(symbol, interval) {
   if (cs.length) {
     S.candles[key] = cs;
     buildPriceChart(cs, symbol, interval);
+
+    // Render forecast panel for this pair
+    const currentSig = S.sigs[key] ?? null;
+    const entries    = projectEntries(cs, currentSig, S.cfg);
+    renderForecastPanel(forecastCont, symbol, entries);
   }
 }
 
 function buildPriceChart(cs, symbol, interval) {
   const canvas = $('price-chart');
   if (!canvas) return;
-  if (priceChart) { priceChart.destroy(); priceChart = null; }
+  if (priceChart) { try { priceChart.destroy(); } catch (_) {} priceChart = null; }
 
   const labels = cs.map(c => new Date(c.time).toLocaleDateString([], { month: 'short', day: 'numeric' }));
   const closes = cs.map(c => c.close);
@@ -523,6 +557,7 @@ function bindTabs() {
     btn.addEventListener('click', () => {
       const tab = btn.dataset.tab;
       S.setMode(tab);
+      localStorage.setItem(STORAGE_KEYS.mode, tab);  // persist mode
 
       // Toggle active class on tab buttons
       tabs.forEach(b => b.classList.toggle('active', b === btn));
@@ -676,6 +711,65 @@ function renderWeightsPanel() {
     `;
     el.appendChild(row);
   });
+}
+
+// ── Bot Connector UI ──────────────────────────────────────
+
+function bindConnector() {
+  loadConnectorCfg();
+
+  const enabledToggle = $('connector-enabled');
+  const urlInput      = $('connector-url');
+  const secretInput   = $('connector-secret');
+  const dryRunChk     = $('connector-dryrun');
+  const testBtn       = $('connector-test-btn');
+  const statusEl      = $('connector-status');
+
+  if (!enabledToggle) return; // panel not in HTML yet
+
+  // Restore UI state
+  if (enabledToggle) enabledToggle.checked = connectorCfg.enabled;
+  if (urlInput)      urlInput.value        = connectorCfg.webhookUrl;
+  if (secretInput)   secretInput.value     = connectorCfg.secret;
+  if (dryRunChk)     dryRunChk.checked     = connectorCfg.dryRun;
+
+  // Save on change
+  const persist = () => {
+    connectorCfg.enabled    = enabledToggle?.checked ?? false;
+    connectorCfg.webhookUrl = urlInput?.value?.trim() ?? '';
+    connectorCfg.secret     = secretInput?.value?.trim() ?? '';
+    connectorCfg.dryRun     = dryRunChk?.checked ?? true;
+    saveConnectorCfg();
+  };
+  enabledToggle?.addEventListener('change', persist);
+  urlInput?.addEventListener('change', persist);
+  secretInput?.addEventListener('change', persist);
+  dryRunChk?.addEventListener('change', persist);
+
+  // Test button — send a dry-run test signal
+  testBtn?.addEventListener('click', async () => {
+    if (!connectorCfg.webhookUrl) {
+      if (statusEl) { statusEl.textContent = '✕ Enter a webhook URL first'; statusEl.style.color = 'var(--sell)'; }
+      return;
+    }
+    testBtn.disabled = true; testBtn.textContent = 'Testing…';
+    const testSig = { dir: 'LONG', sig: 'TEST', conf: 99, engineScore: 99, regime: 'bull', pattern: 'Test', rsns: ['TEST'] };
+    const result  = await sendSignal(testSig, 99999, { size: 100 });
+    testBtn.disabled = false; testBtn.textContent = 'Test';
+    updateConnectorStatus(result);
+  });
+}
+
+function updateConnectorStatus(result) {
+  const statusEl = $('connector-status');
+  if (!statusEl) return;
+  if (result?.ok) {
+    statusEl.textContent = `✓ ${result.response?.status ?? 'OK'} — ${new Date().toLocaleTimeString()}`;
+    statusEl.style.color = 'var(--buy)';
+  } else {
+    statusEl.textContent = `✕ ${result?.error ?? 'Failed'}`;
+    statusEl.style.color = 'var(--sell)';
+  }
 }
 
 // ── Start ─────────────────────────────────────────────────

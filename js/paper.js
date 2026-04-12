@@ -33,8 +33,8 @@ export function tryEnter(key, signal, price) {
     return { ok: false, reason: 'Already in trade on this pair/TF' };
   if (paper.bal < 200)
     return { ok: false, reason: 'Insufficient paper balance' };
-  if (!signal.dir)
-    return { ok: false, reason: 'No directional signal' };
+  if (!signal.dir || signal.conf < cfg.sigMin)
+    return { ok: false, reason: 'Signal below minimum confidence threshold' };
 
   // Position sizing: risk a fixed % of balance, adjusted by SL distance
   const riskAmt = paper.bal * cfg.risk;
@@ -125,7 +125,7 @@ export function monitorTrades(key, price, currentSignal = null) {
       // ── 5. Signal reversal ──────────────────────
       if (!closeReason && currentSignal?.dir &&
           currentSignal.dir !== t.dir &&
-          currentSignal.conf >= 72) {
+          currentSignal.conf >= cfg.sigMin) {
         closeReason = 'Signal Reversal';
         t.status    = `⚠️ Reversal signal (${currentSignal.sig}) — closing`;
       }

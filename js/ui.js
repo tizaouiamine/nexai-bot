@@ -50,15 +50,15 @@ export function renderScanner(tbody) {
     tbody.innerHTML = '';
     const tr = tbody.insertRow();
     const td = tr.insertCell();
-    td.colSpan = 7;
+    td.colSpan = 10;
     td.textContent = 'Scanning pairs…';
     td.style.textAlign = 'center';
     td.style.color = 'var(--muted)';
     return;
   }
 
-  // Sort by confidence desc
-  rows.sort((a, b) => (b.conf ?? 0) - (a.conf ?? 0));
+  // Sort by engineScore desc (falls back to conf)
+  rows.sort((a, b) => (b.engineScore ?? b.conf ?? 0) - (a.engineScore ?? a.conf ?? 0));
 
   // Keyed update — only redraw changed rows
   const existing = {};
@@ -81,29 +81,62 @@ export function renderScanner(tbody) {
                   : sig.includes('SELL')   ? 'badge-sell'
                   : 'badge-neutral';
 
+    // ATR SL as % of price
+    const slPct = (row.atrSL != null && row.price != null && row.price > 0)
+      ? (row.atrSL / row.price * 100).toFixed(2) + '%'
+      : '—';
+
+    // Engine score bar (0-100)
+    const score = row.engineScore ?? null;
+
     tr.innerHTML = '';
-    const cells = [
-      row.pair ?? row.key,
-      row.tf,
-      `$${fmt(row.price)}`,
-      `${row.conf ?? '—'}%`,
-      sig,
-      `${row.rsi?.toFixed(1) ?? '—'}`,
-      row.trend ?? '—',
+
+    // Pair, TF, Price, Conf%, Signal, RSI, Trend
+    const baseCells = [
+      { text: row.pair ?? row.key },
+      { text: row.tf },
+      { text: `$${fmt(row.price)}` },
+      { text: `${row.conf ?? '—'}%` },
+      { text: sig, badge: true, cls: sigCls },
+      { text: `${row.rsi?.toFixed(1) ?? '—'}`, rsiColor: row.rsi },
+      { text: row.trend ?? '—' },
     ];
-    cells.forEach((text, i) => {
+    baseCells.forEach(({ text, badge, cls, rsiColor }) => {
       const td = tr.insertCell();
-      if (i === 4) {
-        const badge = el('span', `badge ${sigCls}`, text);
-        td.appendChild(badge);
+      if (badge) {
+        td.appendChild(el('span', `badge ${cls}`, text));
       } else {
         td.textContent = text;
-      }
-      if (i === 5) {
-        const rsi = row.rsi;
-        if (rsi != null) td.style.color = rsi > 70 ? 'var(--sell)' : rsi < 30 ? 'var(--buy)' : '';
+        if (rsiColor != null) td.style.color = rsiColor > 70 ? 'var(--sell)' : rsiColor < 30 ? 'var(--buy)' : '';
       }
     });
+
+    // Score column — mini bar chart
+    const scoreTd = tr.insertCell();
+    if (score != null) {
+      const barWrap = el('div', 'score-bar-bg');
+      const barFill = el('div', 'score-bar-fill');
+      const scoreColor = score >= 70 ? 'var(--buy)' : score >= 50 ? 'var(--yellow)' : 'var(--sell)';
+      barFill.style.cssText = `width:${score}%;background:${scoreColor};`;
+      const scoreNum = el('span', 'score-num', score);
+      scoreNum.style.color = scoreColor;
+      barWrap.appendChild(barFill);
+      scoreTd.appendChild(barWrap);
+      scoreTd.appendChild(scoreNum);
+    } else {
+      scoreTd.textContent = '—';
+    }
+
+    // SL% column
+    const slTd = tr.insertCell();
+    slTd.textContent = slPct;
+    slTd.style.color = 'var(--sell)';
+
+    // Pattern column
+    const patTd = tr.insertCell();
+    patTd.textContent = row.pattern ?? '—';
+    if (row.pattern) patTd.style.color = 'var(--yellow)';
+
     tr.style.cursor = 'pointer';
     tr.dataset.sym = row.sym;
     tr.dataset.tf  = row.tf;
@@ -347,6 +380,61 @@ export function refreshHeaderStats({ wsCount, sigTotal, botOn }) {
   if (botEl) {
     botEl.textContent = botOn ? 'BOT ON' : 'BOT OFF';
     botEl.className   = `badge ${botOn ? 'badge-buy' : 'badge-sell'}`;
+  }
+}
+
+// ── Forecast panel ───────────────────────────────────────
+
+/**
+ * Render projected trade entry zones in the forecast panel
+ * @param {HTMLElement}      container  - #forecast-panel element
+ * @param {string}           symbol     - e.g. 'BTCUSDT'
+ * @param {ProjectedEntry[]} entries    - from forecast.projectEntries()
+ */
+export function renderForecastPanel(container, symbol, entries) {
+  if (!container) return;
+  container.innerHTML = '';
+
+  const header = el('div', 'forecast-header');
+  header.appendChild(el('span', 'forecast-title', `Projected Entries — ${symbol}`));
+  container.appendChild(header);
+
+  if (!entries?.length) {
+    container.appendChild(el('p', 'forecast-empty', 'No projected zones within range. Price may be extended.'));
+    return;
+  }
+
+  for (const e of entries) {
+    const row = el('div', `forecast-row ${e.dir === 'LONG' ? 'forecast-long' : 'forecast-short'}`);
+
+    const left = el('div', 'forecast-left');
+    const priceEl = el('span', 'forecast-price', `$${fmt(e.price)}`);
+    const labelEl = el('span', 'forecast-label', e.label);
+    left.appendChild(priceEl);
+    left.appendChild(labelEl);
+
+    const right = el('div', 'forecast-right');
+    const confEl = el('span', 'forecast-conf', `~${e.confEstimate}% conf`);
+    const confColor = e.confEstimate >= 72 ? 'var(--buy)' : e.confEstimate >= 60 ? 'var(--yellow)' : 'var(--sell)';
+    confEl.style.color = confColor;
+
+    const distEl = el('span', 'forecast-dist',
+      `${e.dir === 'LONG' ? '↓' : '↑'} ${e.distPct}% away`
+    );
+    distEl.style.color = 'var(--muted)';
+
+    right.appendChild(confEl);
+    right.appendChild(distEl);
+
+    row.appendChild(left);
+    row.appendChild(right);
+
+    if (e.reasons?.length) {
+      const reas = el('div', 'forecast-reasons', e.reasons.join(' · '));
+      row.appendChild(reas);
+    }
+
+    container.appendChild(row);
   }
 }
 
